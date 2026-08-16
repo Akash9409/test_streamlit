@@ -4,22 +4,23 @@ import pandas as pd
 
 
 # =========================================================
-# Page configuration
+# PAGE
 # =========================================================
 
 st.set_page_config(
-    page_title="Customer Data Editor",
+    page_title="Snowflake Data Editor",
     page_icon="📊",
     layout="wide",
 )
 
 
 # =========================================================
-# Snowflake connection
+# CONNECTION
 # =========================================================
 
 @st.cache_resource
 def get_connection():
+
     return snowflake.connector.connect(
         account=st.secrets["snowflake"]["account"],
         user=st.secrets["snowflake"]["user"],
@@ -32,90 +33,278 @@ def get_connection():
 
 
 # =========================================================
-# Load table
+# CONSTANTS
 # =========================================================
 
-def load_customers():
+DATABASE = "STREAMLIT_EXCEL_APP"
+SCHEMA = "DATA"
+
+
+# =========================================================
+# GET AVAILABLE TABLES
+# =========================================================
+
+@st.cache_data(ttl=60)
+def get_tables():
 
     conn = get_connection()
 
-    query = """
+    query = f"""
+        SELECT TABLE_NAME
+        FROM {DATABASE}.INFORMATION_SCHEMA.TABLES
+        WHERE TABLE_SCHEMA = '{SCHEMA}'
+          AND TABLE_TYPE = 'BASE TABLE'
+        ORDER BY TABLE_NAME
+    """
+
+    df = pd.read_sql(query, conn)
+
+    return df["TABLE_NAME"].tolist()
+
+
+# =========================================================
+# GET COLUMNS FOR A TABLE
+# =========================================================
+
+@st.cache_data(ttl=60)
+def get_columns(table_name):
+
+    conn = get_connection()
+
+    query = f"""
         SELECT
-            ID,
-            NAME,
-            EMAIL,
-            STATUS
-        FROM STREAMLIT_EXCEL_APP.DATA.CUSTOMERS
-        ORDER BY ID
+            COLUMN_NAME,
+            DATA_TYPE,
+            ORDINAL_POSITION
+        FROM {DATABASE}.INFORMATION_SCHEMA.COLUMNS
+        WHERE TABLE_SCHEMA = '{SCHEMA}'
+          AND TABLE_NAME = '{table_name}'
+        ORDER BY ORDINAL_POSITION
     """
 
     return pd.read_sql(query, conn)
 
 
 # =========================================================
-# Initialize data
+# LOAD TABLE DATA
 # =========================================================
 
-if "customers" not in st.session_state:
+def load_table(table_name, columns):
 
-    st.session_state.customers = load_customers()
+    # Column names come directly from Snowflake metadata.
+    # We quote them to safely handle names containing
+    # special characters or reserved words.
+
+    quoted_columns = ", ".join(
+        f'"{column}"'
+        for column in columns
+    )
+
+    query = f"""
+        SELECT {quoted_columns}
+        FROM "{DATABASE}"."{SCHEMA}"."{table_name}"
+    """
+
+    conn = get_connection()
+
+    return pd.read_sql(query, conn)
 
 
 # =========================================================
-# Header
+# HEADER
 # =========================================================
 
-st.title("📊 Customer Data")
+st.title("📊 Snowflake Data Editor")
 
-st.caption(
-    "Edit cells, copy/paste from Excel, add rows, or delete rows."
+
+# =========================================================
+# FIND TABLES
+# =========================================================
+
+tables = get_tables()
+
+
+if not tables:
+
+    st.error(
+        f"No tables found in {DATABASE}.{SCHEMA}."
+    )
+
+    st.stop()
+
+
+# =========================================================
+# TABLE DROPDOWN
+# =========================================================
+
+selected_table = st.selectbox(
+    "Select table",
+    tables,
 )
 
 
 # =========================================================
-# Data editor
+# GET COLUMN METADATA
+# =========================================================
+
+column_metadata = get_columns(
+    selected_table
+)
+
+columns = column_metadata[
+    "COLUMN_NAME"
+].tolist()
+
+
+if not columns:
+
+    st.error(
+        f"No columns found for {selected_table}."
+    )
+
+    st.stop()
+
+
+# =========================================================
+# SESSION STATE
+# =========================================================
+
+table_key = f"table_data_{selected_table}"
+
+editor_key = f"editor_{selected_table}"
+
+
+if table_key not in st.session_state:
+
+    st.session_state[table_key] = load_table(
+        selected_table,
+        columns,
+    )
+
+
+# =========================================================
+# CURRENT DATA
+# =========================================================
+
+df = st.session_state[table_key]
+
+
+# =========================================================
+# DYNAMIC COLUMN CONFIG
+# =========================================================
+
+column_config = {}
+
+for _, row in column_metadata.iterrows():
+
+    column_name = row["COLUMN_NAME"]
+    data_type = row["DATA_TYPE"]
+
+    # Numeric Snowflake types
+
+    if data_type in (
+        "NUMBER",
+        "DECIMAL",
+        "NUMERIC",
+        "INTEGER",
+        "INT",
+        "BIGINT",
+        "SMALLINT",
+        "FLOAT",
+        "FLOAT4",
+        "FLOAT8",
+        "DOUBLE",
+        "REAL",
+    ):
+
+        column_config[column_name] = (
+            st.column_config.NumberColumn(
+                column_name,
+            )
+        )
+
+    # Date
+
+    elif data_type == "DATE":
+
+        column_config[column_name] = (
+            st.column_config.DateColumn(
+                column_name,
+            )
+        )
+
+    # Timestamp
+
+    elif "TIMESTAMP" in data_type:
+
+        column_config[column_name] = (
+            st.column_config.DatetimeColumn(
+                column_name,
+            )
+        )
+
+    # Boolean
+
+    elif data_type == "BOOLEAN":
+
+        column_config[column_name] = (
+            st.column_config.CheckboxColumn(
+                column_name,
+            )
+        )
+
+    # Everything else
+
+    else:
+
+        column_config[column_name] = (
+            st.column_config.TextColumn(
+                column_name,
+            )
+        )
+
+
+# =========================================================
+# DATA EDITOR
 # =========================================================
 
 edited_df = st.data_editor(
-    st.session_state.customers,
+
+    df,
+
+    key=editor_key,
+
     num_rows="dynamic",
+
     hide_index=True,
+
     width="stretch",
+
     height=600,
 
-    column_config={
-        "ID": st.column_config.NumberColumn(
-            "ID",
-            help="Unique customer ID",
-            min_value=1,
-            step=1,
-        ),
-
-        "NAME": st.column_config.TextColumn(
-            "Name",
-        ),
-
-        "EMAIL": st.column_config.TextColumn(
-            "Email",
-        ),
-
-        "STATUS": st.column_config.TextColumn(
-            "Status",
-        ),
-    },
-
-    key="customer_editor",
+    column_config=column_config,
 )
 
 
 # =========================================================
-# Save / discard
+# STORE CURRENT EDITS
+# =========================================================
+
+st.session_state[table_key] = edited_df
+
+
+# =========================================================
+# ACTIONS
 # =========================================================
 
 st.divider()
 
 col1, col2 = st.columns([1, 1])
 
+
+# ---------------------------------------------------------
+# SAVE
+# ---------------------------------------------------------
 
 with col1:
 
@@ -129,15 +318,24 @@ with col1:
         )
 
 
+# ---------------------------------------------------------
+# DISCARD
+# ---------------------------------------------------------
+
 with col2:
 
     if st.button("↩️ Discard Changes"):
 
-        st.session_state.customers = load_customers()
+        st.session_state[table_key] = load_table(
+            selected_table,
+            columns,
+        )
 
-        # Clear the editor's widget state so it reloads
-        # from Snowflake.
-        if "customer_editor" in st.session_state:
-            del st.session_state.customer_editor
+        # Remove the editor state so the widget
+        # is recreated using the fresh Snowflake data.
+
+        if editor_key in st.session_state:
+
+            del st.session_state[editor_key]
 
         st.rerun()
