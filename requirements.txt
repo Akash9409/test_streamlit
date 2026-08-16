@@ -1,4 +1,3 @@
 streamlit
 snowflake-connector-python
 pandas
-streamlit-aggrid==1.2.1.post2
