@@ -24,6 +24,37 @@ try:
 
     cursor = conn.cursor()
 
+    # Show current Snowflake context
+    cursor.execute("""
+        SELECT
+            CURRENT_DATABASE(),
+            CURRENT_SCHEMA(),
+            CURRENT_ROLE(),
+            CURRENT_WAREHOUSE()
+    """)
+
+    context = cursor.fetchone()
+
+    st.write("### Snowflake connection details")
+
+    st.write({
+        "Database": context[0],
+        "Schema": context[1],
+        "Role": context[2],
+        "Warehouse": context[3],
+    })
+
+    # Check how many records exist
+    cursor.execute("""
+        SELECT COUNT(*)
+        FROM STREAMLIT_EXCEL_APP.DATA.CUSTOMERS
+    """)
+
+    count = cursor.fetchone()[0]
+
+    st.write(f"### Customers rows found: {count}")
+
+    # Display data
     cursor.execute("""
         SELECT *
         FROM STREAMLIT_EXCEL_APP.DATA.CUSTOMERS
