@@ -109,30 +109,18 @@ def load_table(table_name, columns):
 def save_table(table_name, df, column_metadata):
 
     conn = get_connection()
-
     cursor = conn.cursor()
 
     try:
 
-        # -------------------------------------------------
-        # Start transaction
-        # -------------------------------------------------
-
         cursor.execute("BEGIN")
 
-        # -------------------------------------------------
-        # Remove existing records
-        # -------------------------------------------------
-
+        # Remove current table contents
         cursor.execute(
             f'''
             DELETE FROM "{DATABASE}"."{SCHEMA}"."{table_name}"
             '''
         )
-
-        # -------------------------------------------------
-        # Insert current grid contents
-        # -------------------------------------------------
 
         if not df.empty:
 
@@ -155,9 +143,6 @@ def save_table(table_name, df, column_metadata):
                 VALUES ({placeholders})
             '''
 
-            # Convert pandas NaN / NaT to None
-            # so Snowflake receives NULL.
-
             insert_df = df.copy()
 
             insert_df = insert_df.where(
@@ -178,16 +163,11 @@ def save_table(table_name, df, column_metadata):
                 records
             )
 
-        # -------------------------------------------------
-        # Commit
-        # -------------------------------------------------
-
         cursor.execute("COMMIT")
 
     except Exception:
 
         cursor.execute("ROLLBACK")
-
         raise
 
     finally:
@@ -288,7 +268,7 @@ def parse_excel_paste(text, columns):
 
         return None, f"Could not read pasted data: {e}"
 
-    # Remove empty rows
+    # Remove completely empty rows
 
     pasted_df = pasted_df[
         pasted_df.apply(
@@ -304,7 +284,7 @@ def parse_excel_paste(text, columns):
 
         return None, "No data was found."
 
-    # Detect header
+    # Detect headers
 
     first_row = [
         str(value).strip().upper()
@@ -327,7 +307,7 @@ def parse_excel_paste(text, columns):
             drop=True
         )
 
-    # Validate column count
+    # Check column count
 
     if pasted_df.shape[1] != len(columns):
 
@@ -349,20 +329,22 @@ def parse_excel_paste(text, columns):
 # =========================================================
 
 if "selected_table" not in st.session_state:
-
     st.session_state.selected_table = None
 
 if "table_data" not in st.session_state:
-
     st.session_state.table_data = None
 
 if "editor_version" not in st.session_state:
-
     st.session_state.editor_version = 0
 
 if "show_paste_dialog" not in st.session_state:
-
     st.session_state.show_paste_dialog = False
+
+if "delete_mode" not in st.session_state:
+    st.session_state.delete_mode = False
+
+if "delete_editor_version" not in st.session_state:
+    st.session_state.delete_editor_version = 0
 
 
 # =========================================================
@@ -373,7 +355,7 @@ st.title("📊 Snowflake Data Editor")
 
 
 # =========================================================
-# TABLES
+# GET TABLES
 # =========================================================
 
 tables = get_tables()
@@ -398,7 +380,7 @@ selected_table = st.selectbox(
 
 
 # =========================================================
-# TABLE CHANGE
+# HANDLE TABLE CHANGE
 # =========================================================
 
 if (
@@ -422,6 +404,8 @@ if (
     )
 
     st.session_state.editor_version += 1
+
+    st.session_state.delete_mode = False
 
 
 # =========================================================
@@ -459,128 +443,280 @@ if st.session_state.table_data is None:
 
 
 # =========================================================
-# DATA EDITOR
+# DELETE MODE
 # =========================================================
 
-edited_df = st.data_editor(
+if st.session_state.delete_mode:
 
-    st.session_state.table_data,
+    st.warning(
+        "Delete mode: select the rows you want to remove."
+    )
 
-    key=(
-        f"editor_"
+    # ---------------------------------------------
+    # Create temporary dataframe for delete mode
+    # ---------------------------------------------
+
+    delete_df = st.session_state.table_data.copy()
+
+    delete_df.insert(
+        0,
+        "_DELETE",
+        False
+    )
+
+    delete_editor_key = (
+        f"delete_editor_"
         f"{selected_table}_"
-        f"{st.session_state.editor_version}"
-    ),
+        f"{st.session_state.delete_editor_version}"
+    )
 
-    num_rows="dynamic",
+    delete_column_config = {
+        "_DELETE": st.column_config.CheckboxColumn(
+            "Delete",
+            help="Select this row for deletion",
+            default=False,
+        )
+    }
 
-    hide_index=True,
+    delete_column_config.update(
+        build_column_config(
+            column_metadata
+        )
+    )
 
-    width="stretch",
+    delete_edited_df = st.data_editor(
 
-    height=600,
+        delete_df,
 
-    column_config=build_column_config(
-        column_metadata
-    ),
-)
+        key=delete_editor_key,
+
+        hide_index=True,
+
+        width="stretch",
+
+        height=600,
+
+        column_config=delete_column_config,
+
+        disabled=columns,
+
+    )
+
+    st.divider()
+
+    delete_col1, delete_col2 = st.columns(
+        [1, 1]
+    )
+
+    # ---------------------------------------------
+    # DELETE SELECTED
+    # ---------------------------------------------
+
+    with delete_col1:
+
+        selected_count = int(
+            delete_edited_df["_DELETE"].sum()
+        )
+
+        if selected_count > 0:
+
+            delete_button_text = (
+                f"🗑️ Delete "
+                f"{selected_count} Selected "
+                f"Row"
+            )
+
+            if selected_count != 1:
+                delete_button_text += "s"
+
+        else:
+
+            delete_button_text = (
+                "🗑️ Delete Selected Rows"
+            )
+
+        if st.button(
+            delete_button_text,
+            type="primary",
+            disabled=(selected_count == 0),
+        ):
+
+            remaining_df = (
+                delete_edited_df[
+                    ~delete_edited_df["_DELETE"]
+                ]
+                .drop(columns=["_DELETE"])
+                .reset_index(drop=True)
+            )
+
+            st.session_state.table_data = (
+                remaining_df
+            )
+
+            st.session_state.delete_mode = False
+
+            st.session_state.editor_version += 1
+
+            st.session_state.delete_editor_version += 1
+
+            st.rerun()
+
+    # ---------------------------------------------
+    # CANCEL DELETE MODE
+    # ---------------------------------------------
+
+    with delete_col2:
+
+        if st.button(
+            "Cancel Delete"
+        ):
+
+            st.session_state.delete_mode = False
+
+            st.session_state.delete_editor_version += 1
+
+            st.rerun()
 
 
 # =========================================================
-# ACTION BUTTONS
+# NORMAL MODE
 # =========================================================
 
-st.divider()
+else:
 
-col1, col2, col3 = st.columns(
-    [1, 1, 1]
-)
+    edited_df = st.data_editor(
 
+        st.session_state.table_data,
 
-# =========================================================
-# PASTE
-# =========================================================
+        key=(
+            f"editor_"
+            f"{selected_table}_"
+            f"{st.session_state.editor_version}"
+        ),
 
-with col1:
+        num_rows="dynamic",
 
-    if st.button(
-        "📋 Paste from Excel"
-    ):
+        hide_index=True,
 
-        st.session_state.show_paste_dialog = True
+        width="stretch",
 
+        height=600,
 
-# =========================================================
-# SAVE
-# =========================================================
+        column_config=build_column_config(
+            column_metadata
+        ),
+    )
 
-with col2:
+    # ---------------------------------------------
+    # ACTION BUTTONS
+    # ---------------------------------------------
 
-    if st.button(
-        "💾 Save Changes",
-        type="primary",
-    ):
+    st.divider()
 
-        try:
+    col1, col2, col3, col4 = st.columns(
+        [1, 1, 1, 1]
+    )
 
-            with st.spinner(
-                "Saving changes to Snowflake..."
-            ):
+    # ---------------------------------------------
+    # PASTE
+    # ---------------------------------------------
 
-                save_table(
-                    selected_table,
-                    edited_df,
-                    column_metadata,
-                )
+    with col1:
 
-            # Update local state to exactly what
-            # was saved.
+        if st.button(
+            "📋 Paste from Excel"
+        ):
+
+            st.session_state.show_paste_dialog = True
+
+    # ---------------------------------------------
+    # DELETE MODE
+    # ---------------------------------------------
+
+    with col2:
+
+        if st.button(
+            "🗑️ Delete Rows"
+        ):
+
+            # Capture all current edits before
+            # entering delete mode.
 
             st.session_state.table_data = (
                 edited_df.copy()
             )
 
-            # Clear cached table metadata/data if necessary.
+            st.session_state.delete_mode = True
 
-            st.success(
-                f"{selected_table} saved successfully."
-            )
+            st.session_state.delete_editor_version += 1
 
-        except Exception as e:
+            st.rerun()
 
-            st.error(
-                f"Failed to save changes: {e}"
-            )
+    # ---------------------------------------------
+    # SAVE
+    # ---------------------------------------------
 
+    with col3:
 
-# =========================================================
-# DISCARD
-# =========================================================
-
-with col3:
-
-    if st.button(
-        "↩️ Discard Changes"
-    ):
-
-        with st.spinner(
-            "Reloading from Snowflake..."
+        if st.button(
+            "💾 Save Changes",
+            type="primary",
         ):
 
-            st.session_state.table_data = (
-                load_table(
-                    selected_table,
-                    columns,
+            try:
+
+                with st.spinner(
+                    "Saving changes to Snowflake..."
+                ):
+
+                    save_table(
+                        selected_table,
+                        edited_df,
+                        column_metadata,
+                    )
+
+                st.session_state.table_data = (
+                    edited_df.copy()
                 )
+
+                st.success(
+                    f"{selected_table} saved successfully."
+                )
+
+            except Exception as e:
+
+                st.error(
+                    f"Failed to save changes: {e}"
+                )
+
+    # ---------------------------------------------
+    # DISCARD
+    # ---------------------------------------------
+
+    with col4:
+
+        if st.button(
+            "↩️ Discard Changes"
+        ):
+
+            with st.spinner(
+                "Reloading from Snowflake..."
+            ):
+
+                st.session_state.table_data = (
+                    load_table(
+                        selected_table,
+                        columns,
+                    )
+                )
+
+            st.session_state.editor_version += 1
+
+            st.success(
+                "Changes discarded."
             )
 
-        st.session_state.editor_version += 1
-
-        st.success(
-            "Changes discarded."
-        )
-
-        st.rerun()
+            st.rerun()
 
 
 # =========================================================
@@ -621,6 +757,13 @@ if st.session_state.show_paste_dialog:
                 type="primary",
             ):
 
+                # Get current editor data.
+                #
+                # If we're in normal mode, edited_df
+                # is available from the current run.
+
+                current_df = edited_df
+
                 new_rows, error = parse_excel_paste(
                     pasted_text,
                     columns,
@@ -634,7 +777,7 @@ if st.session_state.show_paste_dialog:
 
                     combined_df = pd.concat(
                         [
-                            edited_df,
+                            current_df,
                             new_rows,
                         ],
                         ignore_index=True,
