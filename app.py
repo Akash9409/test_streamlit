@@ -82,7 +82,7 @@ def get_columns(table_name):
 
 
 # =========================================================
-# LOAD TABLE DATA
+# LOAD TABLE
 # =========================================================
 
 def load_table(table_name, columns):
@@ -103,7 +103,100 @@ def load_table(table_name, columns):
 
 
 # =========================================================
-# CREATE COLUMN CONFIG
+# SAVE TABLE
+# =========================================================
+
+def save_table(table_name, df, column_metadata):
+
+    conn = get_connection()
+
+    cursor = conn.cursor()
+
+    try:
+
+        # -------------------------------------------------
+        # Start transaction
+        # -------------------------------------------------
+
+        cursor.execute("BEGIN")
+
+        # -------------------------------------------------
+        # Remove existing records
+        # -------------------------------------------------
+
+        cursor.execute(
+            f'''
+            DELETE FROM "{DATABASE}"."{SCHEMA}"."{table_name}"
+            '''
+        )
+
+        # -------------------------------------------------
+        # Insert current grid contents
+        # -------------------------------------------------
+
+        if not df.empty:
+
+            columns = column_metadata[
+                "COLUMN_NAME"
+            ].tolist()
+
+            quoted_columns = ", ".join(
+                f'"{column}"'
+                for column in columns
+            )
+
+            placeholders = ", ".join(
+                ["%s"] * len(columns)
+            )
+
+            insert_query = f'''
+                INSERT INTO "{DATABASE}"."{SCHEMA}"."{table_name}"
+                ({quoted_columns})
+                VALUES ({placeholders})
+            '''
+
+            # Convert pandas NaN / NaT to None
+            # so Snowflake receives NULL.
+
+            insert_df = df.copy()
+
+            insert_df = insert_df.where(
+                pd.notnull(insert_df),
+                None
+            )
+
+            records = [
+                tuple(row)
+                for row in insert_df.itertuples(
+                    index=False,
+                    name=None
+                )
+            ]
+
+            cursor.executemany(
+                insert_query,
+                records
+            )
+
+        # -------------------------------------------------
+        # Commit
+        # -------------------------------------------------
+
+        cursor.execute("COMMIT")
+
+    except Exception:
+
+        cursor.execute("ROLLBACK")
+
+        raise
+
+    finally:
+
+        cursor.close()
+
+
+# =========================================================
+# COLUMN CONFIG
 # =========================================================
 
 def build_column_config(column_metadata):
@@ -183,9 +276,6 @@ def parse_excel_paste(text, columns):
 
     try:
 
-        # Excel normally puts copied cells into
-        # tab-separated text.
-
         pasted_df = pd.read_csv(
             io.StringIO(text),
             sep="\t",
@@ -198,9 +288,7 @@ def parse_excel_paste(text, columns):
 
         return None, f"Could not read pasted data: {e}"
 
-    # -----------------------------------------------------
-    # Remove completely empty rows
-    # -----------------------------------------------------
+    # Remove empty rows
 
     pasted_df = pasted_df[
         pasted_df.apply(
@@ -216,9 +304,7 @@ def parse_excel_paste(text, columns):
 
         return None, "No data was found."
 
-    # -----------------------------------------------------
-    # Detect header row
-    # -----------------------------------------------------
+    # Detect header
 
     first_row = [
         str(value).strip().upper()
@@ -241,9 +327,7 @@ def parse_excel_paste(text, columns):
             drop=True
         )
 
-    # -----------------------------------------------------
-    # Validate number of columns
-    # -----------------------------------------------------
+    # Validate column count
 
     if pasted_df.shape[1] != len(columns):
 
@@ -255,17 +339,13 @@ def parse_excel_paste(text, columns):
             ),
         )
 
-    # -----------------------------------------------------
-    # Apply column names
-    # -----------------------------------------------------
-
     pasted_df.columns = columns
 
     return pasted_df, None
 
 
 # =========================================================
-# INITIAL STATE
+# SESSION STATE
 # =========================================================
 
 if "selected_table" not in st.session_state:
@@ -280,6 +360,10 @@ if "editor_version" not in st.session_state:
 
     st.session_state.editor_version = 0
 
+if "show_paste_dialog" not in st.session_state:
+
+    st.session_state.show_paste_dialog = False
+
 
 # =========================================================
 # HEADER
@@ -289,7 +373,7 @@ st.title("📊 Snowflake Data Editor")
 
 
 # =========================================================
-# GET TABLES
+# TABLES
 # =========================================================
 
 tables = get_tables()
@@ -363,7 +447,7 @@ if not columns:
 
 
 # =========================================================
-# SAFETY INITIALIZATION
+# INITIAL DATA
 # =========================================================
 
 if st.session_state.table_data is None:
@@ -409,19 +493,21 @@ edited_df = st.data_editor(
 st.divider()
 
 col1, col2, col3 = st.columns(
-    [1, 1, 6]
+    [1, 1, 1]
 )
 
 
 # =========================================================
-# PASTE FROM EXCEL
+# PASTE
 # =========================================================
 
 with col1:
 
-    paste_clicked = st.button(
+    if st.button(
         "📋 Paste from Excel"
-    )
+    ):
+
+        st.session_state.show_paste_dialog = True
 
 
 # =========================================================
@@ -430,41 +516,93 @@ with col1:
 
 with col2:
 
-    save_clicked = st.button(
+    if st.button(
         "💾 Save Changes",
         type="primary",
-    )
+    ):
+
+        try:
+
+            with st.spinner(
+                "Saving changes to Snowflake..."
+            ):
+
+                save_table(
+                    selected_table,
+                    edited_df,
+                    column_metadata,
+                )
+
+            # Update local state to exactly what
+            # was saved.
+
+            st.session_state.table_data = (
+                edited_df.copy()
+            )
+
+            # Clear cached table metadata/data if necessary.
+
+            st.success(
+                f"{selected_table} saved successfully."
+            )
+
+        except Exception as e:
+
+            st.error(
+                f"Failed to save changes: {e}"
+            )
+
+
+# =========================================================
+# DISCARD
+# =========================================================
+
+with col3:
+
+    if st.button(
+        "↩️ Discard Changes"
+    ):
+
+        with st.spinner(
+            "Reloading from Snowflake..."
+        ):
+
+            st.session_state.table_data = (
+                load_table(
+                    selected_table,
+                    columns,
+                )
+            )
+
+        st.session_state.editor_version += 1
+
+        st.success(
+            "Changes discarded."
+        )
+
+        st.rerun()
 
 
 # =========================================================
 # PASTE DIALOG
 # =========================================================
 
-if paste_clicked:
-
-    st.session_state.show_paste_dialog = True
-
-
-if (
-    "show_paste_dialog" in st.session_state
-    and st.session_state.show_paste_dialog
-):
+if st.session_state.show_paste_dialog:
 
     @st.dialog("Paste from Excel")
     def paste_dialog():
 
         st.write(
-            "Copy rows from Excel and paste them "
-            "into the box below."
+            "Copy rows from Excel and paste them below."
         )
 
         st.caption(
-            "You can paste multiple rows and columns. "
+            "Multiple rows and columns are supported. "
             "Column headers are detected automatically."
         )
 
         pasted_text = st.text_area(
-            "Paste Excel data here",
+            "Excel data",
             height=250,
             placeholder=(
                 "Copy cells from Excel and press "
@@ -492,11 +630,7 @@ if (
 
                     st.error(error)
 
-                elif new_rows is not None:
-
-                    # IMPORTANT:
-                    # edited_df is the current state of
-                    # the editor during this Streamlit run.
+                else:
 
                     combined_df = pd.concat(
                         [
@@ -529,32 +663,3 @@ if (
                 st.rerun()
 
     paste_dialog()
-
-
-# =========================================================
-# SAVE PLACEHOLDER
-# =========================================================
-
-if save_clicked:
-
-    st.info(
-        "Snowflake save logic will be implemented next."
-    )
-
-
-# =========================================================
-# DISCARD / RELOAD
-# =========================================================
-
-st.divider()
-
-if st.button("↩️ Reload from Snowflake"):
-
-    st.session_state.table_data = load_table(
-        selected_table,
-        columns,
-    )
-
-    st.session_state.editor_version += 1
-
-    st.rerun()
