@@ -1,5 +1,13 @@
 import streamlit as st
 import snowflake.connector
+import pandas as pd
+
+from st_aggrid import (
+    AgGrid,
+    GridOptionsBuilder,
+    GridUpdateMode,
+    DataReturnMode,
+)
 
 st.set_page_config(
     page_title="Snowflake Data Editor",
@@ -9,8 +17,14 @@ st.set_page_config(
 
 st.title("Snowflake Data Editor")
 
-try:
-    conn = snowflake.connector.connect(
+
+# ---------------------------------------------------------
+# Snowflake connection
+# ---------------------------------------------------------
+
+@st.cache_resource
+def get_connection():
+    return snowflake.connector.connect(
         account=st.secrets["snowflake"]["account"],
         user=st.secrets["snowflake"]["user"],
         password=st.secrets["snowflake"]["password"],
@@ -20,63 +34,105 @@ try:
         role=st.secrets["snowflake"]["role"],
     )
 
-    st.success("Connected to Snowflake!")
 
-    cursor = conn.cursor()
+# ---------------------------------------------------------
+# Load data
+# ---------------------------------------------------------
 
-    # Show current Snowflake context
-    cursor.execute("""
+def load_customers():
+    conn = get_connection()
+
+    query = """
         SELECT
-            CURRENT_DATABASE(),
-            CURRENT_SCHEMA(),
-            CURRENT_ROLE(),
-            CURRENT_WAREHOUSE()
-    """)
-
-    context = cursor.fetchone()
-
-    st.write("### Snowflake connection details")
-
-    st.write({
-        "Database": context[0],
-        "Schema": context[1],
-        "Role": context[2],
-        "Warehouse": context[3],
-    })
-
-    # Check how many records exist
-    cursor.execute("""
-        SELECT COUNT(*)
-        FROM STREAMLIT_EXCEL_APP.DATA.CUSTOMERS
-    """)
-
-    count = cursor.fetchone()[0]
-
-    st.write(f"### Customers rows found: {count}")
-
-    # Display data
-    cursor.execute("""
-        SELECT *
+            ID,
+            NAME,
+            EMAIL,
+            STATUS
         FROM STREAMLIT_EXCEL_APP.DATA.CUSTOMERS
         ORDER BY ID
-    """)
+    """
 
-    rows = cursor.fetchall()
+    return pd.read_sql(query, conn)
 
-    columns = [column[0] for column in cursor.description]
 
-    st.dataframe(
-        rows,
-        column_config={
-            column: st.column_config.TextColumn(column)
-            for column in columns
-        },
-        use_container_width=True,
-    )
+df = load_customers()
 
-    cursor.close()
-    conn.close()
 
-except Exception as e:
-    st.error("Could not connect to Snowflake.")
-    st.exception(e)
+# ---------------------------------------------------------
+# Display table
+# ---------------------------------------------------------
+
+st.subheader("Customers")
+
+st.write(
+    "You can edit cells directly, copy/paste multiple cells, "
+    "and add/delete rows."
+)
+
+
+gb = GridOptionsBuilder.from_dataframe(df)
+
+gb.configure_default_column(
+    editable=True,
+    resizable=True,
+    sortable=True,
+    filter=True,
+)
+
+gb.configure_column(
+    "ID",
+    editable=True,
+)
+
+gb.configure_column(
+    "NAME",
+    editable=True,
+)
+
+gb.configure_column(
+    "EMAIL",
+    editable=True,
+)
+
+gb.configure_column(
+    "STATUS",
+    editable=True,
+)
+
+gb.configure_grid_options(
+    enableRangeSelection=True,
+    enableClipboard=True,
+    suppressClipboardPaste=False,
+)
+
+gb.configure_selection(
+    selection_mode="multiple",
+    use_checkbox=True,
+)
+
+grid_options = gb.build()
+
+
+response = AgGrid(
+    df,
+    gridOptions=grid_options,
+    data_return_mode=DataReturnMode.AS_INPUT,
+    update_mode=GridUpdateMode.VALUE_CHANGED,
+    fit_columns_on_grid_load=True,
+    allow_unsafe_jscode=True,
+    height=500,
+)
+
+edited_df = response["data"]
+
+
+# ---------------------------------------------------------
+# Temporary debug output
+# ---------------------------------------------------------
+
+st.subheader("Current Grid Data")
+
+st.dataframe(
+    edited_df,
+    use_container_width=True,
+)
